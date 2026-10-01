@@ -1,0 +1,89 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+skinparam defaultFontName "DejaVu Sans"
+
+AddElementTag("new", $bgColor="#1E8449", $borderColor="#145A32", $legendText="новый компонент, выносится первым")
+AddElementTag("changed", $bgColor="#D68910", $borderColor="#9C640C", $legendText="изменяется или изолируется")
+AddElementTag("keep", $bgColor="#7F8C8D", $borderColor="#566573", $legendText="без изменений")
+AddRelTag("new", $textColor="#1E8449", $lineColor="#1E8449", $legendText="новая или изменённая связь")
+
+title Диаграмма контейнеров: платформа заказов RetailCore (TO-BE, горизонт — год)
+
+Person(customer, "Покупатель", "Оформляет заказы, следит за статусом")
+Person(support, "Оператор поддержки", "Разбирает обращения")
+Person(bizUsers, "Бизнес-пользователи", "Маркетинг, финансы, операции")
+
+System_Ext(marketplaces, "Маркетплейсы", "Контракт не меняется")
+System_Ext(payments, "Платёжные провайдеры", "Без изменений")
+System_Ext(delivery, "Склады и службы доставки", "Резерв слотов, доставка, подтверждения")
+System_Ext(bi, "BI и отчётность", "Управленческие отчёты")
+
+System_Boundary(rc, "Платформа заказов RetailCore, собственный ЦОД") {
+    Container(channels, "Сайт и мобильное приложение", "Web, Mobile", "Интерфейс покупателя", $tags="keep")
+    Container(gateway, "API Gateway", "Шлюз", "Единая точка входа: запись — в ядро, чтение статусов — в сервис статусов; переключение и откат маршрутом", $tags="new")
+
+    System_Boundary(core, "Ядро заказа (монолит, Java)") {
+        Container(order, "Оформление и обработка заказа", "Java", "Создание заказа, резерв, статусы; идемпотентность и компенсация при сбое оплаты", $tags="changed")
+        Container(pricing, "Расчёт цены и промо", "Java, модуль", "Единый интерфейс вместо трёх механизмов, правила в конфигурации, теневой расчёт", $tags="changed")
+        Container(payment, "Платёжная оркестрация", "Java", "Статус ожидания оплаты, отмена резерва при сбое", $tags="changed")
+        Container(manualApi, "API ручных операций", "Java", "Проверка допустимости перехода, автор и причина, событие", $tags="new")
+        Container(outbox, "Публикатор событий", "Transactional outbox", "Событие в одной транзакции с изменением заказа", $tags="new")
+    }
+
+    Container(promo, "Промо-сервис", "Сервис", "Расчёт скидок; явный ответ «скидки нет» или «недоступен»", $tags="keep")
+    Container(stock, "Сервис наличия", "Сервис", "Проверка наличия товара", $tags="keep")
+
+    ContainerDb(oracle, "Oracle", "Oracle, PL/SQL", "Операционная БД ядра; новые интеграции через таблицы запрещены; архивирование истории", $tags="changed")
+
+    ContainerQueue(broker, "Брокер событий заказа", "Брокер сообщений", "Версионируемые контракты, at-least-once, идемпотентные потребители", $tags="new")
+
+    Container(status, "Сервис статусов и истории заказа", "Сервис", "Клиентский и внутренний статус, история, справочник причин", $tags="new")
+    ContainerDb(statusDb, "БД статусов", "Хранилище сервиса", "Проекция статусов и истории", $tags="new")
+    Container(notify, "Сервис уведомлений", "Сервис", "Уведомления по событиям заказа", $tags="new")
+    Container(logistics, "Шлюз логистических интеграций", ".NET", "Единый контракт заявки и статуса доставки, адаптеры партнёров, повторы и дедупликация", $tags="new")
+    Container(analytics, "Аналитический контур", "Python, CDC", "Каноническая модель заказа, загрузка из событий и CDC", $tags="new")
+    ContainerDb(dwh, "Аналитическое хранилище", "Хранилище", "Витрины и словарь показателей", $tags="new")
+    Container(admin, "Административные инструменты", "Web", "Ручные операции только через API ядра", $tags="changed")
+    Container(observability, "Платформа наблюдаемости", "Логи, метрики, трассировка", "Сквозной идентификатор заказа во всех компонентах", $tags="new")
+}
+
+Rel(customer, channels, "Оформляет заказ, смотрит статус", "HTTPS")
+Rel(channels, gateway, "Запросы", "HTTPS", $tags="new")
+Rel(marketplaces, gateway, "Заказы и статусы", "Order API, контракт прежний", $tags="new")
+Rel(gateway, order, "Создание и изменение заказа", "HTTPS, синхронно")
+Rel(gateway, status, "Чтение статуса и истории", "HTTPS", $tags="new")
+
+Rel(order, pricing, "Расчёт цены", "внутренний интерфейс")
+Rel(pricing, promo, "Расчёт скидки", "синхронно")
+Rel(order, stock, "Проверка наличия", "синхронно")
+Rel(order, delivery, "Резерв слота доставки", "синхронно")
+Rel(order, payment, "Платёжная сессия")
+Rel(payment, payments, "Создаёт сессию, при сбое — компенсация", "HTTPS, синхронно")
+
+Rel(order, oracle, "Заказ, статусы", "SQL")
+Rel(order, outbox, "Факт изменения заказа")
+Rel(outbox, broker, "События заказа", "", $tags="new")
+
+Rel(broker, status, "События заказа", "", $tags="new")
+Rel(status, statusDb, "Проекция")
+Rel(broker, notify, "События заказа", "", $tags="new")
+Rel(broker, logistics, "События заказа", "", $tags="new")
+Rel(logistics, delivery, "Заявки, статусы доставки", "адаптеры партнёров", $tags="new")
+Rel(logistics, broker, "События доставки", "", $tags="new")
+Rel(broker, analytics, "События заказа", "", $tags="new")
+Rel(oracle, analytics, "CDC для таблиц без событий", "журнал изменений", $tags="new")
+Rel(analytics, dwh, "Загрузка")
+Rel(bi, dwh, "Отчёты", "SQL", $tags="new")
+Rel(bizUsers, bi, "Получают отчёты")
+
+Rel(support, admin, "Разбирает обращения", "HTTPS")
+Rel(admin, status, "Карточка и история заказа", "HTTPS", $tags="new")
+Rel(admin, manualApi, "Ручные операции с аудитом", "HTTPS", $tags="new")
+Rel(manualApi, order, "Изменение по правилам")
+
+Lay_D(gateway, core)
+Lay_R(broker, status)
+
+SHOW_LEGEND()
+@enduml
