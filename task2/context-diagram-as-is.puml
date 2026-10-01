@@ -1,0 +1,88 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+skinparam defaultFontName "DejaVu Sans"
+
+AddElementTag("problem", $bgColor="#C0392B", $borderColor="#7B241C", $legendText="проблемная зона")
+AddRelTag("async", $lineStyle=DashedLine(), $legendText="асинхронный или пакетный обмен")
+AddRelTag("manual", $textColor="#C0392B", $lineColor="#C0392B", $legendText="ручное изменение данных")
+
+title Диаграмма контейнеров: платформа заказов RetailCore (AS-IS)
+
+Person(customer, "Покупатель", "Оформляет заказы, следит за статусом")
+Person(support, "Оператор поддержки", "Разбирает обращения")
+Person(bizUsers, "Бизнес-пользователи", "Маркетинг, финансы, операции")
+
+System_Ext(marketplaces, "Маркетплейсы", "Источник заказов, получатель статусов")
+System_Ext(payments, "Платёжные провайдеры", "Платёжные сессии, оплата, возвраты")
+System_Ext(delivery, "Склады и службы доставки", "Резерв слотов, доставка, подтверждения")
+System_Ext(bi, "BI и отчётность", "Управленческие отчёты")
+
+System_Boundary(rc, "Платформа заказов RetailCore, собственный ЦОД") {
+    Container(channels, "Сайт и мобильное приложение", "Web, Mobile", "Интерфейс покупателя")
+
+    Container(monolith, "Монолитное ядро", "Java", "Оркестратор: Order API и оформление, цена и промо (3 механизма), обработка и резервирование, статусы, платёжная оркестрация, маршрутизация доставки, уведомления, выгрузки", $tags="problem")
+
+    Container(promo, "Промо-сервис", "Сервис", "Расчёт скидок; вызывается не во всех сценариях")
+    Container(stock, "Сервис наличия", "Сервис", "Проверка наличия товара")
+
+    ContainerQueue(async, "Асинхронный обмен", "Брокер, таблицы-очереди, batch, CSV", "Разная семантика доставки: at-least-once, опрос таблиц; дедупликация не везде", $tags="problem")
+
+    Container(dotnet, "Сервис партнёрских интеграций", ".NET", "Логистические и партнёрские интеграции")
+    Container(python, "Аналитические задания", "Python", "Пайплайны и витрины: SQL, staging, API, CSV")
+    Container(admin, "Административные инструменты", "Web", "Ручные проверки, смена статусов, правка настроек маршрутов", $tags="problem")
+
+    ContainerDb(oracle, "Oracle", "Oracle, PL/SQL", "Операционная БД (десятки ТБ), PL/SQL-логика (legacy_promo_pkg, правила), staging- и служебные таблицы, таблица повторов доставки, ночные SQL-скрипты", $tags="problem")
+}
+
+' Каналы
+Rel(customer, channels, "1. Оформляет заказ, смотрит статус", "HTTPS")
+Rel(channels, monolith, "2. Создаёт и меняет заказ", "HTTPS, синхронно")
+Rel(marketplaces, monolith, "3. Заказы, обновления, статусы", "Order API напрямую")
+
+' Синхронная цепочка оформления
+Rel(monolith, promo, "4. Расчёт скидки; без ответа — откат на PL/SQL", "синхронно")
+Rel(monolith, stock, "5. Проверка наличия", "синхронно")
+Rel(monolith, delivery, "6. Резерв слота доставки", "синхронно")
+Rel(monolith, payments, "7. Платёжная сессия; при сбое резерв не отменяется", "HTTPS, синхронно")
+
+' Данные
+BiRel(monolith, oracle, "8. Заказ, статусы, вызовы PL/SQL", "SQL, длинные транзакции")
+
+' Асинхронный контур
+Rel(monolith, async, "9. События, задания, выгрузки", "", $tags="async")
+Rel(async, delivery, "10. Заявки и выгрузки; повторы дают дубли", "брокер, batch", $tags="async")
+Rel(async, dotnet, "11. Задания партнёрских сценариев", "", $tags="async")
+BiRel(dotnet, oracle, "12. Экспорт заказов, статусы интеграций", "staging-таблицы INT_ORDER_EXPORT", $tags="async")
+Rel(dotnet, delivery, "13. Партнёрские интеграции", "разные протоколы")
+
+' Аналитика
+Rel(python, oracle, "14. Читает данные для аналитики", "прямой SQL, staging, CSV")
+Rel(python, bi, "15. Витрины", "batch", $tags="async")
+Rel(bi, oracle, "16. Отчётные запросы", "прямой SQL")
+Rel(bizUsers, bi, "17. Получают отчёты")
+
+' Ручные операции
+Rel(support, admin, "18. Разбирает обращения", "HTTPS")
+Rel(admin, oracle, "19. Ручная смена статусов, правка таблиц маршрутов", "прямое изменение данных", $tags="manual")
+
+Lay_R(channels, monolith)
+Lay_D(monolith, oracle)
+Lay_R(promo, stock)
+
+note right of monolith
+  Вся цепочка оформления — один метод
+  OrderProcessingService.createOrder:
+  цена, промо, запись заказа, маршрут,
+  резерв слота, платёжная сессия, статусы.
+  «Подтверждён» ставится до оплаты.
+end note
+
+note bottom of oracle
+  Хранит данные, часть бизнес-логики
+  и служит интеграционным слоем;
+  аналитика и BI нагружают операционную БД
+end note
+
+SHOW_LEGEND()
+@enduml
